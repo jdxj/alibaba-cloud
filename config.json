@@ -1,0 +1,24 @@
+{
+  "debug": true,
+  "mode": 0,
+  "mysql": {
+    "user": "root",
+    "password": "",
+    "address": "mysql.aaronkir.xyz",
+    "database": "ali"
+  },
+  "access": {
+    "region": "hd1h",
+    "access_key_id": "",
+    "access_secret": ""
+  },
+  "server": {
+    "listen_addr": ":49164",
+    "domain_name": "aaronkir.xyz"
+  },
+  "client": {
+    "name": "danke",
+    "dial_addr": "",
+    "interval": "1m"
+  }
+}
