@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func readConfig() *Config {
@@ -34,19 +35,12 @@ func TestNewServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
-	exist, err := server.hasRecord("mysql")
+	record, err := server.getRecord("mysql")
 	if err != nil {
 		t.Fatalf("%s", err)
 	}
-	if !exist {
-		t.Fatalf("%s", "record not exist")
-	}
-	exist, err = server.hasRecord("danke")
-	if err != nil {
-		t.Fatalf("%s", err)
-	}
-	if exist {
-		t.Fatalf("%s", "has resolve domain name by manual?")
+	if record != nil {
+		fmt.Printf("%s\n", record.Value)
 	}
 }
 
@@ -80,4 +74,63 @@ func TestJsonMarshal(t *testing.T) {
 	a := &A{}
 	json.Unmarshal(reqP.Data, a)
 	fmt.Printf("%+v\n", *a)
+}
+
+func TestPrint(t *testing.T) {
+	str := "danke"
+	data, _ := json.Marshal(str)
+	fmt.Printf("len: %d, data: %s\n", len(data), data)
+
+	err := json.Unmarshal(data, &str)
+	if err != nil {
+		t.Fatalf("%s\n", str)
+	}
+	fmt.Printf("%s\n", str)
+}
+
+func TestAddRecord(t *testing.T) {
+	config := readConfig()
+
+	server, err := NewServer(config.Server, config.Access, config.MySQL)
+	if err != nil {
+		t.Fatalf("%s\n", err)
+	}
+
+	//err = server.addRecord("danke", "111.0.82.121")
+	//if err != nil {
+	//	t.Fatalf("%s\n", err)
+	//}
+
+	server.addRecordSilently("danke", "111.0.82.121")
+}
+
+func TestDelRecord(t *testing.T) {
+	config := readConfig()
+
+	server, err := NewServer(config.Server, config.Access, config.MySQL)
+	if err != nil {
+		t.Fatalf("%s\n", err)
+	}
+
+	server.delRecordSilently("danke")
+}
+
+func TestModRecord(t *testing.T) {
+	config := readConfig()
+
+	server, err := NewServer(config.Server, config.Access, config.MySQL)
+	if err != nil {
+		t.Fatalf("%s\n", err)
+	}
+
+	resp, err := server.addRecord("danke", "111.0.82.121")
+	if err != nil {
+		t.Fatalf("%s\n", err)
+	}
+
+	time.Sleep(time.Minute)
+	err = server.modRecord(resp.RecordId, "danke2", "111.0.82.121")
+	if err != nil {
+		t.Fatalf("%s\n", err)
+	}
 }

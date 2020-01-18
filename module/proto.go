@@ -2,15 +2,15 @@ package module
 
 import "encoding/json"
 
-type Cmd int
-type Stat int
+type Cmd string
+type Stat string
 
 const (
-	SendAddr Cmd = iota
+	SendAddr Cmd = "send_addr"
 )
 
 const (
-	Success Stat = iota
+	Success Stat = "success"
 )
 
 type Request struct {

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
 
@@ -31,12 +31,13 @@ func NewServer(sc *ServerConfig, access *Access, mc *MySQLConfig) (*Server, erro
 	}
 
 	s := &Server{
-		stop:   make(chan struct{}),
-		wg:     &sync.WaitGroup{},
-		mutex:  &sync.Mutex{},
-		config: sc,
-		access: access,
-		mysql:  mysql,
+		stop:        make(chan struct{}),
+		wg:          &sync.WaitGroup{},
+		mutex:       &sync.Mutex{},
+		remoteAddrs: make(map[string]net.Addr),
+		config:      sc,
+		access:      access,
+		mysql:       mysql,
 	}
 	return s, nil
 }
@@ -45,8 +46,8 @@ type Server struct {
 	stop chan struct{}
 	wg   *sync.WaitGroup
 
-	mutex      *sync.Mutex
-	remoteAddr net.Addr
+	mutex       *sync.Mutex
+	remoteAddrs map[string]net.Addr
 
 	config *ServerConfig
 	access *Access
@@ -125,26 +126,53 @@ func (s *Server) handleConn(conn net.Conn) {
 	req := &Request{}
 	err := decoder.Decode(req)
 	if err != nil {
-		logs.Error("error when decode request")
+		logs.Error("decode error when handle conn")
 		return
 	}
 
 	switch req.Cmd {
 	case SendAddr:
-		s.handleSendAddr(conn)
+		s.handleSendAddr(conn, req)
 	default:
-		conn.Close()
 		logs.Warn("Cmd error: not define")
 	}
 }
 
-func (s *Server) handleSendAddr(conn net.Conn) {
+func (s *Server) handleSendAddr(conn net.Conn, req *Request) {
 	defer conn.Close()
 
+	var name string
+	err := json.Unmarshal(req.Data, &name)
+	if err != nil {
+		logs.Error("unmarshal error when handle send addr")
+		return
+	}
+
+	remoteAddr := conn.RemoteAddr()
+	remoteIP := getIP(remoteAddr)
+
+	// 避免在锁中有耗时操作
+	var needAdd bool
 	s.mutex.Lock()
-	s.remoteAddr = conn.RemoteAddr()
-	logs.Info("remote address: %s", s.remoteAddr)
+	if addr, ok := s.remoteAddrs[name]; !ok {
+		s.remoteAddrs[name] = remoteAddr
+		needAdd = true
+	} else {
+		if getIP(addr) != remoteIP {
+			s.remoteAddrs[name] = remoteAddr
+			needAdd = true
+		}
+	}
+	logs.Info("remote name: %s, address: %s", name, conn.RemoteAddr())
 	s.mutex.Unlock()
+
+	if needAdd {
+		if err := s.mysql.InsertIP(name, remoteIP); err != nil {
+			logs.Error("insert ip error when handle send addr: %s", err)
+		}
+
+		s.addRecordSilently(name, remoteIP)
+	}
 
 	encoder := json.NewEncoder(conn)
 	resp := &Response{
@@ -155,37 +183,135 @@ func (s *Server) handleSendAddr(conn net.Conn) {
 	}
 }
 
-func (s *Server) hasRecord(recordName string) (bool, error) {
+func (s *Server) getRecord(recordName string) (*alidns.Record, error) {
 	access := s.access
 	client, err := alidns.NewClientWithAccessKey(access.Region, access.AccessKeyID, access.AccessSecret)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	req := alidns.CreateDescribeDomainRecordsRequest()
 	req.Scheme = "https"
 	req.DomainName = s.config.DomainName
 
-	var resp *alidns.DescribeDomainRecordsResponse
-	// 重试
-	for i := 0; i < 3; i++ {
-		resp, err = client.DescribeDomainRecords(req)
-		if err != nil {
-			logs.Error("get domain records failed, retry count: %d, error: %s", i, err)
-			time.Sleep(time.Second)
-			continue
-		}
-		break
-	}
-
+	resp, err := client.DescribeDomainRecords(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	for _, record := range resp.DomainRecords.Record {
+	for i, record := range resp.DomainRecords.Record {
 		if record.RR == recordName {
-			return true, nil
+			return &resp.DomainRecords.Record[i], nil
 		}
 	}
-	return false, nil
+	return nil, nil
+}
+
+func getIP(addr net.Addr) string {
+	addrStr := addr.String()
+	idx := strings.Index(addrStr, ":")
+	if idx < 0 {
+		return ""
+	}
+	return addrStr[:idx]
+}
+
+func (s *Server) addRecord(recordName, value string) (*alidns.AddDomainRecordResponse, error) {
+	access := s.access
+	client, err := alidns.NewClientWithAccessKey(access.Region, access.AccessKeyID, access.AccessSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	req := alidns.CreateAddDomainRecordRequest()
+	req.Scheme = "https"
+	req.DomainName = s.config.DomainName
+	req.Type = "A"
+	req.RR = recordName
+	req.Value = value
+
+	return client.AddDomainRecord(req)
+}
+
+func (s *Server) delRecord(recordID string) error {
+	access := s.access
+	client, err := alidns.NewClientWithAccessKey(access.Region, access.AccessKeyID, access.AccessSecret)
+	if err != nil {
+		return err
+	}
+
+	req := alidns.CreateDeleteDomainRecordRequest()
+	req.Scheme = "https"
+	req.RecordId = recordID
+
+	resp, err := client.DeleteDomainRecord(req)
+	if err != nil {
+		return err
+	}
+	logs.Debug("del record resp: %+v", resp)
+	return nil
+}
+
+// addRecordSilently 如果不存在则添加, 否则修改.
+func (s *Server) addRecordSilently(recordName, value string) {
+	record, err := s.getRecord(recordName)
+	if err != nil {
+		logs.Error("get record error when insert records silently: %s", err)
+		return
+	}
+
+	if record != nil {
+		if err := s.modRecord(record.RecordId, recordName, value); err != nil {
+			logs.Error("mod record error when add record silently: %s", err)
+		}
+		return
+	}
+
+	_, err = s.addRecord(recordName, value)
+	if err != nil {
+		logs.Error("add record error when insert records silently: %s", err)
+		return
+	}
+}
+
+func (s *Server) modRecord(recordID, recordName, value string) error {
+	access := s.access
+	client, err := alidns.NewClientWithAccessKey(access.Region, access.AccessKeyID, access.AccessSecret)
+	if err != nil {
+		return err
+	}
+
+	req := alidns.CreateUpdateDomainRecordRequest()
+	req.Scheme = "https"
+
+	req.RecordId = recordID
+	req.Type = "A"
+	req.RR = recordName
+	req.Value = value
+
+	resp, err := client.UpdateDomainRecord(req)
+	if err != nil {
+		return err
+	}
+	logs.Info("mod record resp: %+v", resp)
+	return nil
+}
+
+func (s *Server) delRecordSilently(recordName string) {
+	record, err := s.getRecord(recordName)
+	if err != nil {
+		logs.Error("get record error when del record silently: %s", err)
+		return
+	}
+
+	if record == nil {
+		logs.Warn("record not exist: %s", recordName)
+		return
+	}
+
+	err = s.delRecord(record.RecordId)
+	if err != nil {
+		logs.Error("del record error when del record silently: %s", err)
+		return
+	}
 }

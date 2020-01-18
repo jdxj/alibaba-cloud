@@ -1,6 +1,7 @@
 package module
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
@@ -89,17 +90,35 @@ func (c *Client) sendAddr() {
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+	encoder := json.NewEncoder(conn)
+	decoder := json.NewDecoder(conn)
+
+	req := &Request{
+		Cmd: SendAddr,
+	}
+	data, err := json.Marshal(c.config.Name)
 	if err != nil {
-		logs.Error("data: %s, error: %s", buf[:n], err)
+		logs.Error("marshal error when send addr: %s", err)
 		return
 	}
-	resp := string(buf[:n])
-	if resp != "ok" {
-		logs.Error("receive a invalid message")
+	req.Data = data
+
+	err = encoder.Encode(req)
+	if err != nil {
+		logs.Error("encode error when send addr: %s", err)
 		return
 	}
 
-	logs.Info("send address success")
+	resp := &Response{}
+	err = decoder.Decode(resp)
+	if err != nil {
+		logs.Error("decode error when send addr: %s", err)
+		return
+	}
+	if resp.Stat != Success {
+		logs.Warn("send addr failed")
+	} else {
+		logs.Info("send addr success")
+	}
+
 }
