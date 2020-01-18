@@ -3,6 +3,9 @@ package module
 import (
 	"database/sql"
 	"fmt"
+	"time"
+
+	"github.com/astaxie/beego/logs"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -26,17 +29,43 @@ func NewMySQL(config *MySQLConfig) (*MySQL, error) {
 	mysql := &MySQL{
 		config: config,
 		db:     db,
+		stop:   make(chan struct{}),
 	}
+	go func() {
+		mysql.ping()
+	}()
 	return mysql, nil
 }
 
 type MySQL struct {
 	config *MySQLConfig
 	db     *sql.DB
+
+	stop chan struct{}
 }
 
 func (mysql *MySQL) Close() error {
+	close(mysql.stop)
 	return mysql.db.Close()
+}
+
+// ping 用于避免连接失效 (心跳作用)
+func (mysql *MySQL) ping() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-mysql.stop:
+			logs.Info("stop mysql ping")
+			return
+
+		case <-ticker.C:
+			if err := mysql.db.Ping(); err != nil {
+				logs.Error("ping error when mysql ping: %s:", err)
+			}
+		}
+	}
 }
 
 func (mysql *MySQL) InsertIP(name, address string) error {
